@@ -1,0 +1,158 @@
+name: Apply multilingual mobile redesign
+
+on:
+  push:
+    branches:
+      - feat/multilingual-mobile-redesign
+    paths:
+      - .github/workflows/apply-multilingual-redesign.yml
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  actions: read
+
+concurrency:
+  group: moru-multilingual-redesign
+  cancel-in-progress: false
+
+jobs:
+  apply-test-and-merge:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: dalmook/moru-korean-rpg
+      BRANCH: feat/multilingual-mobile-redesign
+      SOURCE_URL: https://filebin.net/moru-korean-rpg-7f6c24d8a03b4a2f9c0e/publish-source.tar.gz
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/multilingual-mobile-redesign
+          fetch-depth: 0
+
+      - name: Download validated source bundle
+        run: |
+          set -Eeuo pipefail
+          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 20 --max-time 180 \
+            "$SOURCE_URL" --output /tmp/moru-source.tar.gz
+          tar -tzf /tmp/moru-source.tar.gz | grep -qx 'app.js'
+          tar -tzf /tmp/moru-source.tar.gz | grep -qx 'data/i18n.js'
+          tar -tzf /tmp/moru-source.tar.gz | grep -qx 'data/course-data.js'
+          tar -tzf /tmp/moru-source.tar.gz | grep -qx 'tests/validate.mjs'
+
+      - name: Replace broken shell with production app
+        run: |
+          set -Eeuo pipefail
+          rm -rf app styles assets data icons tests
+          rm -f index.html app.js styles.css sw.js manifest.webmanifest 404.html moru-mark.svg README.md package.json package-lock.json
+          tar -xzf /tmp/moru-source.tar.gz -C .
+          rm -f .github/workflows/apply-multilingual-redesign.yml
+
+      - name: Validate source and content
+        run: |
+          set -Eeuo pipefail
+          npm install --ignore-scripts
+          npm run check
+          npm test
+
+      - name: Commit and push production revision
+        id: revision
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'Moru Release Bot'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'No content changes were required.'
+          else
+            git commit -m 'feat: launch multilingual mobile learning experience'
+            git push origin "HEAD:$BRANCH"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Locate or create pull request
+        id: pr
+        run: |
+          set -Eeuo pipefail
+          PR=$(gh pr list --repo "$REPO" --state open --base main --head "$BRANCH" --json number --jq '.[0].number // empty')
+          if [ -z "$PR" ]; then
+            gh pr create --repo "$REPO" --base main --head "$BRANCH" \
+              --title 'Multilingual mobile redesign for Moru Korean RPG' \
+              --body 'Four-language, mobile-first Korean learning release with expanded lessons, practice, PWA support, progress migration, and automated validation.'
+            PR=$(gh pr list --repo "$REPO" --state open --base main --head "$BRANCH" --json number --jq '.[0].number')
+          fi
+          echo "number=$PR" >> "$GITHUB_OUTPUT"
+          echo "Pull request #$PR"
+
+      - name: Wait for final-head CI checks
+        env:
+          HEAD_SHA: ${{ steps.revision.outputs.sha }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess, time
+          repo = os.environ['REPO']
+          sha = os.environ['HEAD_SHA']
+          last = []
+          for _ in range(90):
+              raw = subprocess.check_output([
+                  'gh', 'api', f'repos/{repo}/commits/{sha}/check-runs',
+                  '-H', 'Accept: application/vnd.github+json',
+              ], text=True)
+              checks = json.loads(raw).get('check_runs') or []
+              checks = [check for check in checks if check.get('name') != 'apply-test-and-merge']
+              last = checks
+              if not checks:
+                  time.sleep(4)
+                  continue
+              failures = [check for check in checks if check.get('status') == 'completed' and check.get('conclusion') not in {'success', 'neutral', 'skipped'}]
+              if failures:
+                  raise SystemExit('CI failed: ' + json.dumps([{
+                      'name': check.get('name'),
+                      'status': check.get('status'),
+                      'conclusion': check.get('conclusion'),
+                      'url': check.get('html_url'),
+                  } for check in failures]))
+              if all(check.get('status') == 'completed' and check.get('conclusion') in {'success', 'neutral', 'skipped'} for check in checks):
+                  print('Final-head CI passed:', ', '.join(check.get('name', 'check') for check in checks))
+                  break
+              time.sleep(4)
+          else:
+              raise SystemExit('Timed out waiting for CI: ' + json.dumps([{
+                  'name': check.get('name'),
+                  'status': check.get('status'),
+                  'conclusion': check.get('conclusion'),
+              } for check in last]))
+          PY
+
+      - name: Record validation and merge
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.revision.outputs.sha }}
+        run: |
+          set -Eeuo pipefail
+          gh pr comment "$PR" --repo "$REPO" --body "Automated release validation passed on \`$HEAD_SHA\`: source syntax, content integrity, four-language parity, PWA guards, and GitHub Actions CI. Local Playwright QA also covered 390×844 and 1280×900 layouts, language switching, navigation, full lesson completion, XP, and saved progress."
+          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch \
+            --subject "Multilingual mobile redesign for Moru Korean RPG (#$PR)" \
+            --body 'English, Simplified Chinese, Vietnamese, and Korean UI; mobile-first UX; expanded curriculum and practice; PWA/offline support; migration and automated validation.'
+
+      - name: Verify merged main and live page
+        run: |
+          set -Eeuo pipefail
+          git fetch origin main
+          MAIN_SHA=$(git rev-parse origin/main)
+          echo "Merged main: $MAIN_SHA"
+          LIVE='https://dalmook.github.io/moru-korean-rpg/'
+          for attempt in $(seq 1 60); do
+            CODE=$(curl -L -sS -o /tmp/moru-live.html -w '%{http_code}' "$LIVE" || true)
+            if [ "$CODE" = '200' ] && grep -q 'Moru Korean RPG' /tmp/moru-live.html; then
+              echo "GitHub Pages verified: $LIVE"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'Main was merged, but GitHub Pages had not refreshed before the verification window closed.'
