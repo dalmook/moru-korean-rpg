@@ -1,0 +1,11 @@
+{
+  "name": "Moru — Korean learning RPG",
+  "short_name": "Moru",
+  "description": "Learn Korean through short, playable quests.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#fffaf1",
+  "theme_color": "#f36f45",
+  "lang": "en",
+  "icons": []
+}
